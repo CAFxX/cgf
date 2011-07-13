@@ -3,7 +3,7 @@
 CGFCallSite::CGFCallSite(CGF *cgf, CallInst *cs) : c(cgf), s(cs), prepared(false), flattened(false) {
     assert(cs->getCalledFunction() != NULL && "Indirect callsite");
     assert(cs->getCalledFunction() != cs->getParent()->getParent() && "Direct recursive callsite");
-    // FIXME FIXME FIXME indirect recursion!!!
+    // FIXME FIXME FIXME detect indirect recursion!!!
 }
 
 void CGFCallSite::prepare() { 
@@ -42,47 +42,37 @@ void CGFCallSite::flatten() {
     assert(prepared && "Not prepared");
     assert(!flattened && "Already flattened");
 
-    //TRACE();
-    //s = dyn_cast<CallInst>(Parent->vmap[s]);
-    //RetBB = dyn_cast<BasicBlock>(Parent->vmap[RetBB]);
     assert(s->getParent()->getParent() == c->dispatch);
-    TRACE();
     // FIXME: handle indirect calls
     BranchInst *callinst = BranchInst::Create(Callee->innerDispatch);
     ReplaceInstWithInst(s->getParent()->getTerminator(), callinst);
-    TRACE();
+
     for (unsigned j=0; j<Args.size(); j++) {
         Callee->argphis[j]->addIncoming(Parent->vmap[Args[j]], s->getParent());
     }
-    TRACE();
     Callee->retphi->addIncoming(BlockAddress::get(RetBB), s->getParent());
-    TRACE();
     Callee->retinst->addDestination(RetBB);
-    //c->dispatch->dump();
-    TRACE();
+
     Value *newRetVal = go_fetch(Callee->retVal, RetBB);
     assert(newRetVal);
-    //c->dispatch->dump();
-    TRACE();
     s->replaceAllUsesWith(newRetVal);
     s->eraseFromParent(); // s==RetVal
-    //c->dispatch->dump();
+
     flattened = true;
 }
 
 void CGFCallSite::splitRetBB() {
-    TRACE();
     BasicBlock *parent = s->getParent();
     for (BasicBlock::iterator i = parent->begin(); i != parent->end(); i++) {
         if (&*i == s) {
             RetBB = SplitBlock(parent, ++i, c->p);
-            RetBB->setName(parent->getName());
             assert(RetBB != NULL && "Can't split BB - SplitBlock returned NULL");
+            RetBB->setName(parent->getName());
             statCanonicalizedCallsites++;
             return;
         }
     }
-    assert(false && "Can't split BB");
+    assert(!"Can't split BB");
 }
 
 
