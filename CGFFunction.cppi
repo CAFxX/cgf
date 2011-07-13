@@ -1,0 +1,191 @@
+#include "CGF.h"
+
+CGFFunction::CGFFunction(CGF *cgf, Function *func) : c(cgf), f(func), prepared(false), flattened(false) {
+    // FIXME: variadic, etc.
+    assert(!f->isDeclaration() && "Can't flatten function declaration");
+    assert(!f->isVarArg() && "Can't flatten variadic function");
+}
+
+void CGFFunction::prepare() {
+    assert(!prepared && "Already prepared");
+    assert(!flattened && "Already flattened");
+
+    // create the parameter struct
+    std::vector<const Type*> _args;
+    for (unsigned i = 0, ie = f->getFunctionType()->getNumParams(); i < ie; i++) {
+        _args.push_back(f->getFunctionType()->getParamType(i));
+    }
+    argsTy = StructType::get(f->getContext(), _args);
+
+    // XXX only a single return value is supported
+    retValTy = f->getReturnType();
+
+    prepared = true;
+}
+
+void CGFFunction::flatten() {
+    assert(prepared && "Not prepared");
+    assert(!flattened && "Already flattened");
+
+    // create the dispatch BBs
+    TRACE();
+    outerDispatch = BasicBlock::Create(f->getContext(), "cgf.dispatchOuter." + f->getName(), c->dispatch);
+    innerDispatch = BasicBlock::Create(f->getContext(), "cgf.dispatchInner." + f->getName(), c->dispatch);
+    returnDispatch = BasicBlock::Create(f->getContext(), "cgf.dispatchReturn." + f->getName(), c->dispatch);
+
+    // add the outer dispatcher to the indirectbr in the dispatch function
+    TRACE();
+    c->outerDispatcher->addDestination(outerDispatch);
+
+    // populate the outer dispatcher (and phi nodes of the inner)
+    // get the opaque arg structure
+    TRACE();
+    BitCastInst *argsptr = new BitCastInst(c->dispatchArgs, PointerType::getUnqual(argsTy), "cgf.argsptr." + f->getName(), outerDispatch);
+    Value *argsval = new LoadInst(argsptr, "cgf.argsval." + f->getName(), outerDispatch);
+    // extract each element of the structure and forward it to the corresponding phi in innerDispatch
+    // prepare at the same time the vmap for the cloning operation
+    unsigned j=0;
+    for (Function::arg_iterator i = f->arg_begin(), ie = f->arg_end(); i != ie; i++, j++) {
+        Value *arg = ExtractValueInst::Create(argsval, j, "cgf.args." + f->getName() + "." + i->getName(), outerDispatch);
+        PHINode *argphi = PHINode::Create(arg->getType(), "cgf.argphi." + f->getName() + "." + i->getName(), innerDispatch);
+        argphi->addIncoming(arg, outerDispatch);
+        argphis.push_back(argphi);
+        vmap[i] = argphi;
+    }
+    // create a phi to hold the return address
+    BlockAddress *retaddr = BlockAddress::get(returnDispatch);
+    retphi = PHINode::Create(retaddr->getType(), "cgf.retphi." + f->getName(), innerDispatch);
+    retphi->addIncoming(retaddr, outerDispatch);
+    // create a jump to the innerDispatch
+    BranchInst::Create(innerDispatch, outerDispatch);
+
+    // place a copy of the body of function f in the dispatch function
+    TRACE();
+    ClonedCodeInfo info;
+    SmallVector<ReturnInst*, 1> retinsts; // we expect a single ReturnInst
+    Twine cloneSuffix = Twine(".") + f->getName() + ".cgf";
+    CloneFunctionInto(c->dispatch, f, vmap, true, retinsts, cloneSuffix.str().c_str(), &info);
+    // create a jump from the innerDispatch to the entry block
+    BasicBlock *newEntryBlock = dyn_cast<BasicBlock>(vmap[&f->getEntryBlock()]);
+    BranchInst::Create(newEntryBlock, innerDispatch);
+
+    // replace the returns of the cloned function
+    // FIXME multiple returns?
+    TRACE();
+    assert(retinsts.size() == 1 && "Multiple returns or no returns");
+    retVal = retinsts[0]->getReturnValue();
+    assert(retVal);
+    // replace the return with an indirectbr
+    //Value *f_retphi = go_fetch(retphi, retinsts[0]->getParent());
+    retinst = IndirectBrInst::Create(retphi, 0);
+    ReplaceInstWithInst(retinsts[0], retinst);
+
+    // populate the returnDispatch
+    // get the opaque retval structure
+    TRACE();
+    BitCastInst *retvalptr = new BitCastInst(c->dispatchRetVal, PointerType::getUnqual(retValTy), "cgf.retvalptr." + f->getName(), returnDispatch);
+    new StoreInst(retVal, retvalptr, returnDispatch);
+    ReturnInst::Create(f->getContext(), returnDispatch);
+    retinst->addDestination(returnDispatch);
+
+    flattened = true;
+
+    // create the wrapper, if needed
+    //createForwardingWrapper(true);
+
+    // after cloning, fix references
+    TRACE();
+    for (std::map<BasicBlock*, CGFCallSite*>::iterator i = csMap.begin(); i != csMap.end(); i++) {
+        if (i->first->getParent() == c->dispatch)
+            continue;
+        CGFCallSite* s = i->second;
+        TRACE();
+        s->s = dyn_cast<CallInst>(vmap[s->s]);
+        s->CallBB = s->s->getParent();
+        assert(s->s);
+        assert(s->s->getParent()->getParent() == c->dispatch);
+        TRACE();
+        s->RetBB = dyn_cast<BasicBlock>(vmap[s->RetBB]);
+        assert(s->RetBB);
+        assert(s->RetBB->getParent() == c->dispatch);
+        TRACE();
+        csMap[s->s->getParent()] = s;
+    }
+}
+
+void CGFFunction::registerCaller(CGFCallSite *s) {
+    callers.push_back(s);
+}
+
+void CGFFunction::registerCallee(CGFCallSite *s) {
+    callees.push_back(s);
+    csMap[s->s->getParent()] = s;
+}
+
+void CGFFunction::createForwardingWrapper(bool replace) {
+    assert(prepared && "Not prepared");
+    assert(flattened && "Not flattened");
+
+    Function *Wrapper = replace ? f : CloneFunction(f);
+    Function *Target = c->dispatch;
+    // empty the body of function Wrapper
+    Wrapper->dropAllReferences();
+    for (Function::iterator b = Wrapper->begin(), be = Wrapper->end(); b != be; ++b)
+        b->removeFromParent();
+    Wrapper->setDoesNotAccessMemory(false);
+    // create a new entry bb for Wrapper
+    BasicBlock *BB = BasicBlock::Create(Wrapper->getContext(), "entry", Wrapper, NULL);
+
+    // create the structure for passing the parameters
+    AllocaInst *argsptr = new AllocaInst(argsTy, "argsptr", BB);
+    Value *opaqueargsptr = CastInst::CreatePointerCast(argsptr, c->opaqueTy, "argsptr.opaque", BB);
+    Value *aggr = UndefValue::get(argsTy);
+    int i = 0;
+    for (Function::arg_iterator a = Wrapper->arg_begin(), ae = Wrapper->arg_end(); a != ae; ++a, ++i)
+        aggr = InsertValueInst::Create(aggr, a, i, "args", BB);
+    new StoreInst(aggr, argsptr, BB);
+    // create the structure for the return value
+    AllocaInst *retvalptr = new AllocaInst(retValTy, "retvalptr", BB);
+    Value *opaqueretvalptr = CastInst::CreatePointerCast(retvalptr, c->opaqueTy, "retvalptr.opaque", BB);
+
+    // create the forwarding call and insert it into BB
+    std::vector<Value*> wrappedArgs;
+    wrappedArgs.push_back(BlockAddress::get(outerDispatch));
+    wrappedArgs.push_back(opaqueargsptr);
+    wrappedArgs.push_back(opaqueretvalptr);
+    CallInst *CI = CallInst::Create(Target, wrappedArgs.begin(), wrappedArgs.end(), "", BB);
+    CI->setCallingConv(Target->getCallingConv());
+
+    // unwrap and return the result of the forwarded call
+    if (!f->getType()->isVoidTy()) {
+        Value *retval = new LoadInst(retvalptr, "retval", BB);
+        ReturnInst::Create(Wrapper->getContext(), retval, BB);
+    } else {
+        CI->setTailCall(); 
+        ReturnInst::Create(Wrapper->getContext(), BB);
+    }
+}
+
+void CGFFunction::fixDummyPhis() {
+    TRACE();
+    for (BasicBlock::iterator j = innerDispatch->begin(), je = innerDispatch->end(); j != je; j++) {
+        TRACE();
+        if (PHINode *phi = dyn_cast<PHINode>(&*j)) {
+            TRACE();
+            assert(phi);
+            if (phi->getBasicBlockIndex(outerDispatch) < 0) {
+                phi->addIncoming(UndefValue::get(phi->getType()), outerDispatch);
+            }
+            for (unsigned i=0; i<callers.size(); i++) {
+                TRACE();
+                assert(callers[i]);
+                assert(callers[i]->CallBB);
+                if (phi->getBasicBlockIndex(callers[i]->CallBB) < 0) {
+                    phi->addIncoming(UndefValue::get(phi->getType()), callers[i]->CallBB);
+                }
+            }
+        }
+    }
+}
+
+

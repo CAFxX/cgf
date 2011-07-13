@@ -1,0 +1,160 @@
+#include "CGF.h"
+
+CGF::CGF(ModulePass *pass, Module *module) : p(pass), m(module) {
+    opaqueTy = Type::getInt8PtrTy(m->getContext());
+}
+
+void CGF::run() {
+    // enumerate all functions that will be transformed
+    TRACEMSG("Registering functions...");
+    for (Module::iterator f = m->begin(); f != m->end(); f++) {
+        if (f->isDeclaration() || f->isVarArg())
+            continue;
+        registerFunction(f);
+    }
+
+    // enumerate all callsites that will be transformed
+    TRACEMSG("Registering callsites...");
+    for (Module::iterator f = m->begin(); f != m->end(); f++) {
+        for (Function::iterator b = f->begin(); b != f->end(); b++) {
+            for (BasicBlock::iterator i = b->begin(); i != b->end(); i++) {
+                if (CallInst *c = dyn_cast<CallInst>(i)) {
+                    if (c->getCalledFunction() == NULL)
+                        TRACEMSG("Indirect callsite skipped");
+                    else if (c->getCalledFunction() == c->getParent()->getParent())
+                        TRACEMSG("Direct recursive callsite skipped");
+                    else if (funcs.count(c->getCalledFunction()) == 0)
+                        TRACEMSG("Function not flattened");
+                    else
+                        registerCallsite(c);
+                }
+            }
+        }
+    }
+
+    // create dispatch function
+    TRACEMSG("Creating dispatch function...");
+    createDispatchFunction(); 
+
+    // flatten functions
+    TRACEMSG("Flattening functions...");
+    for (funcMap::iterator f = funcs.begin(); f != funcs.end(); f++) {
+        f->second->flatten();
+    }
+
+    // flatten callsites
+    TRACEMSG("Flattening callsites...");
+    for (callsiteMap::iterator s = calls.begin(); s != calls.end(); s++) {
+        s->second->flatten();
+    }
+
+    // create wrapper functions
+    TRACEMSG("Creating wrappers...");
+    for (funcMap::iterator f = funcs.begin(); f != funcs.end(); f++) {
+        f->second->createForwardingWrapper(true);
+    }
+
+    // fix phi_dummys
+    TRACEMSG("Fixing broken values...");
+    fixBrokenValues();
+
+    // fix phi_dummys
+    TRACEMSG("Fixing dummy phis...");
+    fixDummyPhis();
+
+    dispatch->setDoesNotAccessMemory(false);
+    assert(dispatch->doesNotAccessMemory() == false);
+    for (int i=0; i<=3; i++) {
+        dispatch->setDoesNotAlias(i, i != 0);
+        dispatch->setDoesNotCapture(i, i != 0);
+    }
+}
+
+void CGF::registerFunction(Function *f) {
+    CGFFunction *F = new CGFFunction(this, f);
+    F->prepare();
+    funcs[f] = F;
+}
+
+void CGF::registerCallsite(CallInst *s) {
+    CGFCallSite *S = new CGFCallSite(this, s);
+    S->prepare();
+    calls[s] = S;
+}
+
+void CGF::createDispatchFunction() {
+    // create the function itself
+    TRACE();
+    std::vector<const Type*> args;
+    args.push_back(opaqueTy); // label of outer dispatch bb
+    args.push_back(opaqueTy); // arguments
+    args.push_back(opaqueTy); // return value
+    const FunctionType *dispatchTy = FunctionType::get(Type::getVoidTy(m->getContext()), args, false);
+    dispatch = Function::Create(dispatchTy, GlobalValue::PrivateLinkage, "dispatch", m);
+    dispatch->setCallingConv(CallingConv::Fast);
+    BasicBlock *dispatchEntry = BasicBlock::Create(m->getContext(), "entry", dispatch);
+    assert(dispatchEntry == &dispatch->getEntryBlock());
+    Function::arg_iterator i = dispatch->arg_begin();
+    Argument *entryBBptr = &*i++;
+    entryBBptr->setName("EntryBBPtr");
+    dispatchArgs = &*i++;
+    dispatchArgs->setName("OpaqueArgumentsPtr");
+    dispatchRetVal = &*i++;
+    dispatchRetVal->setName("OpaqueReturnValuePtr");
+
+    // create the outer dispatcher
+    TRACE();
+    assert(entryBBptr->getType() == opaqueTy);
+    outerDispatcher = IndirectBrInst::Create(entryBBptr, 0, dispatchEntry);
+}
+
+void CGF::fixBrokenValues() {
+    for (Function::iterator i = dispatch->begin(), ie = dispatch->end(); i != ie; i++) {
+        for (BasicBlock::iterator j = i->begin(), je = i->end(); j != je; j++) {
+            //j->dump();
+            if (PHINode *phi = dyn_cast<PHINode>(&*j)) {
+                for (unsigned k=0, ke=phi->getNumIncomingValues(); k<ke; k++) {
+                    Value *v = phi->getIncomingValue(k);
+                    Value *f_v = go_fetch(v, phi->getIncomingBlock(k));
+                    if (!f_v) {
+                        errs() << "Can't fix broken incoming value!\n";
+                        j->dump();
+                        v->dump();
+                    } else if (v != f_v) {
+                        phi->setIncomingValue(k, f_v);
+                        statFixedBrokenValues++;
+                    }
+                }
+            } else {
+                for (User::op_iterator k = j->op_begin(), ke = j->op_end(); k != ke; k++) {
+                    Value *v = k->get();
+                    assert(v);
+                    TRACE();
+                    Instruction *inst = dyn_cast<Instruction>(v);
+                    if (inst && inst->getParent() == &*i)
+                        continue;                        
+                    //v->dump();
+                    Value *f_v = go_fetch(v, &*i);
+                    TRACE();
+                    if (!f_v) {
+                        errs() << "Can't fix broken value!\n";
+                        j->dump();
+                        j->getParent()->dump();
+                        v->dump();
+                        inst->getParent()->dump();
+                    } else if (v != f_v) {
+                        j->replaceUsesOfWith(v, f_v);
+                        statFixedBrokenValues++;
+                    }
+                }
+            }
+        }
+    }
+}
+
+void CGF::fixDummyPhis() {
+    for (funcMap::iterator f = funcs.begin(); f != funcs.end(); f++) {
+        f->second->fixDummyPhis();
+    }
+}
+

@@ -1,0 +1,89 @@
+#include "CGF.h"
+
+CGFCallSite::CGFCallSite(CGF *cgf, CallInst *cs) : c(cgf), s(cs), prepared(false), flattened(false) {
+    assert(cs->getCalledFunction() != NULL && "Indirect callsite");
+    assert(cs->getCalledFunction() != cs->getParent()->getParent() && "Direct recursive callsite");
+    // FIXME FIXME FIXME indirect recursion!!!
+}
+
+void CGFCallSite::prepare() { 
+    TRACE();
+    assert(!prepared && "Already prepared");
+    assert(!flattened && "Already flattened");
+
+    // split the return BB
+    splitRetBB();
+
+    // get the list of possible call targets
+    // XXX currently only direct call targets are supported
+    Parent = c->funcs.find( s->getParent()->getParent() )->second;
+    assert(s->getParent()->getParent() == Parent->f);
+    Parent->registerCallee(this);
+
+    CGFFunction *f = c->funcs.find( s->getCalledFunction() )->second;
+    assert(f!=Parent);
+    f->registerCaller(this);
+    //Callees.push(f);
+    Callee = f;
+
+    // get the arguments
+    for (unsigned i=0; i<s->getNumArgOperands(); i++) {
+        Args.push_back(s->getArgOperand(i));
+    }
+
+    // get the return values
+    // XXX only a single return value is supported
+    RetVal = s;
+
+    prepared = true;
+}
+
+void CGFCallSite::flatten() {
+    assert(prepared && "Not prepared");
+    assert(!flattened && "Already flattened");
+
+    //TRACE();
+    //s = dyn_cast<CallInst>(Parent->vmap[s]);
+    //RetBB = dyn_cast<BasicBlock>(Parent->vmap[RetBB]);
+    assert(s->getParent()->getParent() == c->dispatch);
+    TRACE();
+    // FIXME: handle indirect calls
+    BranchInst *callinst = BranchInst::Create(Callee->innerDispatch);
+    ReplaceInstWithInst(s->getParent()->getTerminator(), callinst);
+    TRACE();
+    for (unsigned j=0; j<Args.size(); j++) {
+        Callee->argphis[j]->addIncoming(Parent->vmap[Args[j]], s->getParent());
+    }
+    TRACE();
+    Callee->retphi->addIncoming(BlockAddress::get(RetBB), s->getParent());
+    TRACE();
+    Callee->retinst->addDestination(RetBB);
+    //c->dispatch->dump();
+    TRACE();
+    Value *newRetVal = go_fetch(Callee->retVal, RetBB);
+    assert(newRetVal);
+    //c->dispatch->dump();
+    TRACE();
+    s->replaceAllUsesWith(newRetVal);
+    s->eraseFromParent(); // s==RetVal
+    //c->dispatch->dump();
+    flattened = true;
+}
+
+void CGFCallSite::splitRetBB() {
+    TRACE();
+    BasicBlock *parent = s->getParent();
+    for (BasicBlock::iterator i = parent->begin(); i != parent->end(); i++) {
+        if (&*i == s) {
+            RetBB = SplitBlock(parent, ++i, c->p);
+            RetBB->setName(parent->getName());
+            assert(RetBB != NULL && "Can't split BB - SplitBlock returned NULL");
+            statCanonicalizedCallsites++;
+            return;
+        }
+    }
+    assert(false && "Can't split BB");
+}
+
+
+
