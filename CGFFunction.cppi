@@ -126,10 +126,11 @@ void CGFFunction::createForwardingWrapper(bool replace) {
     for (Function::iterator b = Wrapper->begin(), be = Wrapper->end(); b != be; ++b)
         b->removeFromParent();
     Wrapper->setDoesNotAccessMemory(false);
+
     // create a new entry bb for Wrapper
     BasicBlock *BB = BasicBlock::Create(Wrapper->getContext(), "entry", Wrapper, NULL);
 
-    // allocate stack space for the parameters
+    // allocate stack space for the parameters if needed
     Value *opaqueargsptr = undef(c->opaqueTy);
     if (f->arg_begin() != f->arg_end()) {
         AllocaInst *argsptr = new AllocaInst(argsTy, "argsptr", BB);
@@ -141,7 +142,7 @@ void CGFFunction::createForwardingWrapper(bool replace) {
         new StoreInst(aggr, argsptr, BB);
     }
 
-    // allocate stack space for the return value
+    // allocate stack space for the return value if needed
     Value *opaqueretvalptr = undef(c->opaqueTy);
     AllocaInst *retvalptr = NULL;
     if (!f->getType()->isVoidTy()) {
@@ -149,7 +150,7 @@ void CGFFunction::createForwardingWrapper(bool replace) {
         opaqueretvalptr = CastInst::CreatePointerCast(retvalptr, c->opaqueTy, "retvalptr.opaque", BB);
     }
 
-    // create the forwarding call and insert it into BB
+    // create the forwarding call
     std::vector<Value*> wrappedArgs(3);
     wrappedArgs.push_back(BlockAddress::get(outerDispatch));
     wrappedArgs.push_back(opaqueargsptr);
@@ -157,6 +158,7 @@ void CGFFunction::createForwardingWrapper(bool replace) {
     CallInst *CI = CallInst::Create(Target, wrappedArgs.begin(), wrappedArgs.end(), "", BB);
     CI->setCallingConv(Target->getCallingConv());
 
+    // lastly, insert the return instruction
     if (!f->getType()->isVoidTy()) {
         // unwrap and return the result of the forwarded call
         Value *retval = new LoadInst(retvalptr, "retval", BB);

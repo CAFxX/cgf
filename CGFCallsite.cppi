@@ -20,11 +20,9 @@ void CGFCallSite::prepare() {
     assert(s->getParent()->getParent() == Parent->f);
     Parent->registerCallee(this);
 
-    CGFFunction *f = c->funcs.find( s->getCalledFunction() )->second;
-    assert(f!=Parent);
-    f->registerCaller(this);
-    //Callees.push(f);
-    Callee = f;
+    Callee = c->funcs.find( s->getCalledFunction() )->second;
+    assert(Callee != Parent);
+    Callee->registerCaller(this);
 
     // get the arguments
     for (unsigned i=0; i<s->getNumArgOperands(); i++) {
