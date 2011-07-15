@@ -63,7 +63,7 @@ void CGFCallSite::flatten() {
 
 void CGFCallSite::splitRetBB() {
     BasicBlock *parent = s->getParent();
-    for (BasicBlock::iterator i = parent->begin(); i != parent->end(); i++) {
+    for (BasicBlock::iterator i = parent->begin(), ie = parent->end(); i != ie; i++) {
         if (&*i == s) {
             RetBB = SplitBlock(parent, ++i, c->p);
             assert(RetBB != NULL && "Can't split BB - SplitBlock returned NULL");

@@ -1,7 +1,6 @@
 #include "CGF.h"
 
 CGFFunction::CGFFunction(CGF *cgf, Function *func) : c(cgf), f(func), prepared(false), flattened(false) {
-    // FIXME: variadic, etc.
     assert(!f->isDeclaration() && "Can't flatten function declaration");
     assert(!f->isVarArg() && "Can't flatten variadic function");
 }
@@ -11,13 +10,11 @@ void CGFFunction::prepare() {
     assert(!flattened && "Already flattened");
 
     // create the parameter struct
-    std::vector<const Type*> _args;
-    for (unsigned i = 0, ie = f->getFunctionType()->getNumParams(); i < ie; i++) {
-        _args.push_back(f->getFunctionType()->getParamType(i));
-    }
+    std::vector<const Type*> _args(f->getFunctionType()->param_begin(), f->getFunctionType()->param_end());
     argsTy = StructType::get(f->getContext(), _args);
 
-    // XXX only a single return value is supported
+    // FIXME? only a single return value is supported
+    // TODO? merge the return value in the parameter struct
     retValTy = f->getReturnType();
 
     prepared = true;
@@ -76,22 +73,20 @@ void CGFFunction::flatten() {
     retVal = retinsts[0]->getReturnValue();
     assert(retVal);
     // replace the return with an indirectbr
-    //Value *f_retphi = go_fetch(retphi, retinsts[0]->getParent());
     retinst = IndirectBrInst::Create(retphi, 0);
     ReplaceInstWithInst(retinsts[0], retinst);
 
     // populate the returnDispatch
     // get the opaque retval structure
     TRACE();
-    BitCastInst *retvalptr = new BitCastInst(c->dispatchRetVal, PointerType::getUnqual(retValTy), "cgf.retvalptr." + f->getName(), returnDispatch);
-    new StoreInst(retVal, retvalptr, returnDispatch);
+    if (!retValTy->isVoidTy()) {
+        BitCastInst *retvalptr = new BitCastInst(c->dispatchRetVal, PointerType::getUnqual(retValTy), "cgf.retvalptr." + f->getName(), returnDispatch);
+        new StoreInst(retVal, retvalptr, returnDispatch);
+    }
     ReturnInst::Create(f->getContext(), returnDispatch);
     retinst->addDestination(returnDispatch);
 
     flattened = true;
-
-    // create the wrapper, if needed
-    //createForwardingWrapper(true);
 
     // after cloning, fix references
     TRACE();
@@ -99,16 +94,13 @@ void CGFFunction::flatten() {
         if (i->first->getParent() == c->dispatch)
             continue;
         CGFCallSite* s = i->second;
-        TRACE();
         s->s = dyn_cast<CallInst>(vmap[s->s]);
-        s->CallBB = s->s->getParent();
         assert(s->s);
-        assert(s->s->getParent()->getParent() == c->dispatch);
-        TRACE();
+        s->CallBB = s->s->getParent();
+        assert(s->CallBB->getParent() == c->dispatch);
         s->RetBB = dyn_cast<BasicBlock>(vmap[s->RetBB]);
         assert(s->RetBB);
         assert(s->RetBB->getParent() == c->dispatch);
-        TRACE();
         csMap[s->s->getParent()] = s;
     }
 }
@@ -128,6 +120,7 @@ void CGFFunction::createForwardingWrapper(bool replace) {
 
     Function *Wrapper = replace ? f : CloneFunction(f);
     Function *Target = c->dispatch;
+
     // empty the body of function Wrapper
     Wrapper->dropAllReferences();
     for (Function::iterator b = Wrapper->begin(), be = Wrapper->end(); b != be; ++b)
@@ -136,31 +129,40 @@ void CGFFunction::createForwardingWrapper(bool replace) {
     // create a new entry bb for Wrapper
     BasicBlock *BB = BasicBlock::Create(Wrapper->getContext(), "entry", Wrapper, NULL);
 
-    // create the structure for passing the parameters
-    AllocaInst *argsptr = new AllocaInst(argsTy, "argsptr", BB);
-    Value *opaqueargsptr = CastInst::CreatePointerCast(argsptr, c->opaqueTy, "argsptr.opaque", BB);
-    Value *aggr = UndefValue::get(argsTy);
-    int i = 0;
-    for (Function::arg_iterator a = Wrapper->arg_begin(), ae = Wrapper->arg_end(); a != ae; ++a, ++i)
-        aggr = InsertValueInst::Create(aggr, a, i, "args", BB);
-    new StoreInst(aggr, argsptr, BB);
-    // create the structure for the return value
-    AllocaInst *retvalptr = new AllocaInst(retValTy, "retvalptr", BB);
-    Value *opaqueretvalptr = CastInst::CreatePointerCast(retvalptr, c->opaqueTy, "retvalptr.opaque", BB);
+    // allocate stack space for the parameters
+    Value *opaqueargsptr = undef(c->opaqueTy);
+    if (f->arg_begin() != f->arg_end()) {
+        AllocaInst *argsptr = new AllocaInst(argsTy, "argsptr", BB);
+        opaqueargsptr = CastInst::CreatePointerCast(argsptr, c->opaqueTy, "argsptr.opaque", BB);
+        Value *aggr = undef(argsTy);
+        int i = 0;
+        for (Function::arg_iterator a = Wrapper->arg_begin(), ae = Wrapper->arg_end(); a != ae; ++a, ++i)
+            aggr = InsertValueInst::Create(aggr, a, i, "args", BB);
+        new StoreInst(aggr, argsptr, BB);
+    }
+
+    // allocate stack space for the return value
+    Value *opaqueretvalptr = undef(c->opaqueTy);
+    AllocaInst *retvalptr = NULL;
+    if (!f->getType()->isVoidTy()) {
+        retvalptr = new AllocaInst(retValTy, "retvalptr", BB);
+        opaqueretvalptr = CastInst::CreatePointerCast(retvalptr, c->opaqueTy, "retvalptr.opaque", BB);
+    }
 
     // create the forwarding call and insert it into BB
-    std::vector<Value*> wrappedArgs;
+    std::vector<Value*> wrappedArgs(3);
     wrappedArgs.push_back(BlockAddress::get(outerDispatch));
     wrappedArgs.push_back(opaqueargsptr);
     wrappedArgs.push_back(opaqueretvalptr);
     CallInst *CI = CallInst::Create(Target, wrappedArgs.begin(), wrappedArgs.end(), "", BB);
     CI->setCallingConv(Target->getCallingConv());
 
-    // unwrap and return the result of the forwarded call
     if (!f->getType()->isVoidTy()) {
+        // unwrap and return the result of the forwarded call
         Value *retval = new LoadInst(retvalptr, "retval", BB);
         ReturnInst::Create(Wrapper->getContext(), retval, BB);
     } else {
+        // simply return (and mark as tail call)
         CI->setTailCall(); 
         ReturnInst::Create(Wrapper->getContext(), BB);
     }
@@ -174,14 +176,14 @@ void CGFFunction::fixDummyPhis() {
             TRACE();
             assert(phi);
             if (phi->getBasicBlockIndex(outerDispatch) < 0) {
-                phi->addIncoming(UndefValue::get(phi->getType()), outerDispatch);
+                phi->addIncoming(undef(phi), outerDispatch);
             }
             for (unsigned i=0; i<callers.size(); i++) {
                 TRACE();
                 assert(callers[i]);
                 assert(callers[i]->CallBB);
                 if (phi->getBasicBlockIndex(callers[i]->CallBB) < 0) {
-                    phi->addIncoming(UndefValue::get(phi->getType()), callers[i]->CallBB);
+                    phi->addIncoming(undef(phi), callers[i]->CallBB);
                 }
             }
         }

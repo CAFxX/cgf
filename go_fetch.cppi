@@ -47,12 +47,10 @@ Value *go_fetch(Value *v, BasicBlock *from) {
     if (isa<Constant>(v) || isa<BasicBlock>(v) || BlockAddress::classof(v))
         return v;
 
-    for (Function::arg_iterator i = from->getParent()->arg_begin(), ie = from->getParent()->arg_end(); i != ie; i++) {
+    for (Function::arg_iterator i = from->getParent()->arg_begin(), ie = from->getParent()->arg_end(); i != ie; i++)
         if (v == &*i)
             return v;
-    }
 
-    //std::map<BasicBlock*, Value*> inc;
     go_recurse(v, from, map[v]);
     Value *ret = map[v][from];
     map.clear();
