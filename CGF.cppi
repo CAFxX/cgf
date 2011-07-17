@@ -24,7 +24,9 @@ void CGF::run() {
                     else if (c->getCalledFunction() == c->getParent()->getParent())
                         TRACEMSG("Direct recursive callsite skipped");
                     else if (funcs.count(c->getCalledFunction()) == 0)
-                        TRACEMSG("Function not flattened");
+                        TRACEMSG("Callee not flattened");
+                    else if (funcs.count(c->getParent()->getParent()) == 0)
+                        TRACEMSG("Caller not flattened");
                     else
                         registerCallsite(c);
                 }
@@ -105,15 +107,14 @@ void CGF::createDispatchFunction() {
 void CGF::fixBrokenValues() {
     for (Function::iterator i = dispatch->begin(), ie = dispatch->end(); i != ie; i++) {
         for (BasicBlock::iterator j = i->begin(), je = i->end(); j != je; j++) {
-            //j->dump();
             if (PHINode *phi = dyn_cast<PHINode>(&*j)) {
                 for (unsigned k=0, ke=phi->getNumIncomingValues(); k<ke; k++) {
                     Value *v = phi->getIncomingValue(k);
                     Value *f_v = PropagateValue(v, phi->getIncomingBlock(k));
                     if (!f_v) {
-                        errs() << "Can't fix broken incoming value!\n";
                         j->dump();
                         v->dump();
+                        assert(!"Can't fix broken incoming value!");
                     } else if (v != f_v) {
                         phi->setIncomingValue(k, f_v);
                         statFixedBrokenValues++;
@@ -127,15 +128,14 @@ void CGF::fixBrokenValues() {
                     Instruction *inst = dyn_cast<Instruction>(v);
                     if (inst && inst->getParent() == &*i)
                         continue;                        
-                    //v->dump();
                     Value *f_v = PropagateValue(v, &*i);
                     TRACE();
                     if (!f_v) {
-                        errs() << "Can't fix broken value!\n";
                         j->dump();
                         j->getParent()->dump();
                         v->dump();
                         inst->getParent()->dump();
+                        assert(!"Can't fix broken value!");
                     } else if (v != f_v) {
                         j->replaceUsesOfWith(v, f_v);
                         statFixedBrokenValues++;

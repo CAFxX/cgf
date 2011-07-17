@@ -24,6 +24,9 @@ void CGFFunction::flatten() {
     assert(prepared && "Not prepared");
     assert(!flattened && "Already flattened");
 
+    bool doesNotHaveParams = f->getFunctionType()->getNumParams() == 0;
+    bool doesNotHaveRetval = f->getReturnType()->isVoidTy();
+
     // create the dispatch BBs
     TRACE();
     outerDispatch = BasicBlock::Create(f->getContext(), "cgf.dispatchOuter." + f->getName(), c->dispatch);
@@ -36,18 +39,20 @@ void CGFFunction::flatten() {
 
     // populate the outer dispatcher (and phi nodes of the inner)
     // get the opaque arg structure
-    TRACE();
-    BitCastInst *argsptr = new BitCastInst(c->dispatchArgs, PointerType::getUnqual(argsTy), "cgf.argsptr." + f->getName(), outerDispatch);
-    Value *argsval = new LoadInst(argsptr, "cgf.argsval." + f->getName(), outerDispatch);
-    // extract each element of the structure and forward it to the corresponding phi in innerDispatch
-    // prepare at the same time the vmap for the cloning operation
-    unsigned j=0;
-    for (Function::arg_iterator i = f->arg_begin(), ie = f->arg_end(); i != ie; i++, j++) {
-        Value *arg = ExtractValueInst::Create(argsval, j, "cgf.args." + f->getName() + "." + i->getName(), outerDispatch);
-        PHINode *argphi = PHINode::Create(arg->getType(), "cgf.argphi." + f->getName() + "." + i->getName(), innerDispatch);
-        argphi->addIncoming(arg, outerDispatch);
-        argphis.push_back(argphi);
-        vmap[i] = argphi;
+    if (!doesNotHaveParams) {
+        TRACE();
+        BitCastInst *argsptr = new BitCastInst(c->dispatchArgs, PointerType::getUnqual(argsTy), "cgf.argsptr." + f->getName(), outerDispatch);
+        Value *argsval = new LoadInst(argsptr, "cgf.argsval." + f->getName(), outerDispatch);
+        // extract each element of the structure and forward it to the corresponding phi in innerDispatch
+        // prepare at the same time the vmap for the cloning operation
+        unsigned j=0;
+        for (Function::arg_iterator i = f->arg_begin(), ie = f->arg_end(); i != ie; i++, j++) {
+            Value *arg = ExtractValueInst::Create(argsval, j, "cgf.args." + f->getName() + "." + i->getName(), outerDispatch);
+            PHINode *argphi = PHINode::Create(arg->getType(), "cgf.argphi." + f->getName() + "." + i->getName(), innerDispatch);
+            argphi->addIncoming(arg, outerDispatch);
+            argphis.push_back(argphi);
+            vmap[i] = argphi;
+        }
     }
     // create a phi to hold the return address
     BlockAddress *retaddr = BlockAddress::get(returnDispatch);
@@ -70,8 +75,10 @@ void CGFFunction::flatten() {
     // FIXME multiple returns?
     TRACE();
     assert(retinsts.size() == 1 && "Multiple returns or no returns");
-    retVal = retinsts[0]->getReturnValue();
-    assert(retVal);
+    if (!doesNotHaveRetval) {
+        retVal = retinsts[0]->getReturnValue();
+        assert(retVal);
+    }
     // replace the return with an indirectbr
     retinst = IndirectBrInst::Create(retphi, 0);
     ReplaceInstWithInst(retinsts[0], retinst);
@@ -79,7 +86,7 @@ void CGFFunction::flatten() {
     // populate the returnDispatch
     // get the opaque retval structure
     TRACE();
-    if (!retValTy->isVoidTy()) {
+    if (!doesNotHaveRetval) {
         BitCastInst *retvalptr = new BitCastInst(c->dispatchRetVal, PointerType::getUnqual(retValTy), "cgf.retvalptr." + f->getName(), returnDispatch);
         new StoreInst(retVal, retvalptr, returnDispatch);
     }
@@ -120,6 +127,8 @@ void CGFFunction::createForwardingWrapper(bool replace) {
 
     Function *Wrapper = replace ? f : CloneFunction(f);
     Function *Target = c->dispatch;
+    bool doesNotHaveParams = f->getFunctionType()->getNumParams() == 0;
+    bool doesNotHaveRetval = f->getReturnType()->isVoidTy();
 
     // empty the body of function Wrapper
     Wrapper->dropAllReferences();
@@ -131,8 +140,10 @@ void CGFFunction::createForwardingWrapper(bool replace) {
     BasicBlock *BB = BasicBlock::Create(Wrapper->getContext(), "entry", Wrapper, NULL);
 
     // allocate stack space for the parameters if needed
-    Value *opaqueargsptr = undef(c->opaqueTy);
-    if (f->arg_begin() != f->arg_end()) {
+    TRACE();
+    Value *opaqueargsptr = undef(c->opaqueTy); 
+    if (!doesNotHaveParams) { 
+        TRACE();
         AllocaInst *argsptr = new AllocaInst(argsTy, "argsptr", BB);
         opaqueargsptr = CastInst::CreatePointerCast(argsptr, c->opaqueTy, "argsptr.opaque", BB);
         Value *aggr = undef(argsTy);
@@ -143,14 +154,16 @@ void CGFFunction::createForwardingWrapper(bool replace) {
     }
 
     // allocate stack space for the return value if needed
+    TRACE();
     Value *opaqueretvalptr = undef(c->opaqueTy);
     AllocaInst *retvalptr = NULL;
-    if (!f->getType()->isVoidTy()) {
+    if (!doesNotHaveRetval) {
         retvalptr = new AllocaInst(retValTy, "retvalptr", BB);
         opaqueretvalptr = CastInst::CreatePointerCast(retvalptr, c->opaqueTy, "retvalptr.opaque", BB);
     }
 
     // create the forwarding call
+    TRACE();
     std::vector<Value*> wrappedArgs(3);
     wrappedArgs[0] = BlockAddress::get(outerDispatch);
     wrappedArgs[1] = opaqueargsptr;
@@ -159,11 +172,13 @@ void CGFFunction::createForwardingWrapper(bool replace) {
     CI->setCallingConv(Target->getCallingConv());
 
     // lastly, insert the return instruction
-    if (!f->getType()->isVoidTy()) {
+    if (!doesNotHaveRetval) {
+    TRACE();
         // unwrap and return the result of the forwarded call
         Value *retval = new LoadInst(retvalptr, "retval", BB);
         ReturnInst::Create(Wrapper->getContext(), retval, BB);
     } else {
+    TRACE();
         // simply return (and mark as tail call)
         CI->setTailCall(); 
         ReturnInst::Create(Wrapper->getContext(), BB);
