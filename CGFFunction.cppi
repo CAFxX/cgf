@@ -152,9 +152,9 @@ void CGFFunction::createForwardingWrapper(bool replace) {
 
     // create the forwarding call
     std::vector<Value*> wrappedArgs(3);
-    wrappedArgs.push_back(BlockAddress::get(outerDispatch));
-    wrappedArgs.push_back(opaqueargsptr);
-    wrappedArgs.push_back(opaqueretvalptr);
+    wrappedArgs[0] = BlockAddress::get(outerDispatch);
+    wrappedArgs[1] = opaqueargsptr;
+    wrappedArgs[2] = opaqueretvalptr;
     CallInst *CI = CallInst::Create(Target, wrappedArgs.begin(), wrappedArgs.end(), "", BB);
     CI->setCallingConv(Target->getCallingConv());
 

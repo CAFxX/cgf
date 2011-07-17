@@ -63,7 +63,6 @@ void CGF::run() {
     fixDummyPhis();
 
     dispatch->setDoesNotAccessMemory(false);
-    assert(dispatch->doesNotAccessMemory() == false);
     for (int i=0; i<=3; i++) {
         dispatch->setDoesNotAlias(i, i != 0);
         dispatch->setDoesNotCapture(i, i != 0);
@@ -85,26 +84,21 @@ void CGF::registerCallsite(CallInst *s) {
 void CGF::createDispatchFunction() {
     // create the function itself
     TRACE();
-    std::vector<const Type*> args;
-    args.push_back(opaqueTy); // label of outer dispatch bb
-    args.push_back(opaqueTy); // arguments
-    args.push_back(opaqueTy); // return value
+    std::vector<const Type*> args(3);
+    args[0] = args[1] = args[2] = opaqueTy;
     const FunctionType *dispatchTy = FunctionType::get(Type::getVoidTy(m->getContext()), args, false);
     dispatch = Function::Create(dispatchTy, GlobalValue::PrivateLinkage, "dispatch", m);
     dispatch->setCallingConv(CallingConv::Fast);
-    BasicBlock *dispatchEntry = BasicBlock::Create(m->getContext(), "entry", dispatch);
-    assert(dispatchEntry == &dispatch->getEntryBlock());
     Function::arg_iterator i = dispatch->arg_begin();
-    Argument *entryBBptr = &*i++;
+    Argument *entryBBptr = &*i;
     entryBBptr->setName("EntryBBPtr");
-    dispatchArgs = &*i++;
-    dispatchArgs->setName("OpaqueArgumentsPtr");
-    dispatchRetVal = &*i++;
-    dispatchRetVal->setName("OpaqueReturnValuePtr");
+    (dispatchArgs = &*++i)->setName("OpaqueArgumentsPtr");
+    (dispatchRetVal = &*++i)->setName("OpaqueReturnValuePtr");
 
     // create the outer dispatcher
     TRACE();
-    assert(entryBBptr->getType() == opaqueTy);
+    BasicBlock *dispatchEntry = BasicBlock::Create(m->getContext(), "entry", dispatch);
+    assert(dispatchEntry == &dispatch->getEntryBlock());
     outerDispatcher = IndirectBrInst::Create(entryBBptr, 0, dispatchEntry);
 }
 
@@ -115,7 +109,7 @@ void CGF::fixBrokenValues() {
             if (PHINode *phi = dyn_cast<PHINode>(&*j)) {
                 for (unsigned k=0, ke=phi->getNumIncomingValues(); k<ke; k++) {
                     Value *v = phi->getIncomingValue(k);
-                    Value *f_v = go_fetch(v, phi->getIncomingBlock(k));
+                    Value *f_v = PropagateValue(v, phi->getIncomingBlock(k));
                     if (!f_v) {
                         errs() << "Can't fix broken incoming value!\n";
                         j->dump();
@@ -134,7 +128,7 @@ void CGF::fixBrokenValues() {
                     if (inst && inst->getParent() == &*i)
                         continue;                        
                     //v->dump();
-                    Value *f_v = go_fetch(v, &*i);
+                    Value *f_v = PropagateValue(v, &*i);
                     TRACE();
                     if (!f_v) {
                         errs() << "Can't fix broken value!\n";

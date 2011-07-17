@@ -11,7 +11,6 @@ STATISTIC(statFixedBrokenValues, "Number of fixed broken values");
 namespace {
 
 #include "CGF.h"
-#include "go_fetch.cppi"
 #include "CGF.cppi"
 #include "CGFCallsite.cppi"
 #include "CGFFunction.cppi"

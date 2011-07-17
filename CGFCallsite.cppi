@@ -51,7 +51,7 @@ void CGFCallSite::flatten() {
     Callee->retphi->addIncoming(BlockAddress::get(RetBB), s->getParent());
     Callee->retinst->addDestination(RetBB);
 
-    Value *newRetVal = go_fetch(Callee->retVal, RetBB);
+    Value *newRetVal = PropagateValue(Callee->retVal, RetBB);
     assert(newRetVal);
     s->replaceAllUsesWith(newRetVal);
     s->eraseFromParent(); // s==RetVal

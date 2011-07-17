@@ -62,4 +62,60 @@ unsigned fixDummyPhis(Function *f) {
 // Value propagation                                                //
 //////////////////////////////////////////////////////////////////////
 
+void PropagateValue(Value *v, BasicBlock *from, std::map<BasicBlock*, Value*> &inc) {
+    // check if the value is defined in this basic block
+    for (BasicBlock::iterator i=from->begin(), ie=from->end(); i != ie; i++) {
+        if (&*i == v) {
+            inc[from] = v;
+            return;
+        }
+    }
+    
+    // check if the value is defined in the predecessors
+    Value *undef = UndefValue::get(v->getType());
+    bool found = false;
+    for (pred_iterator i=pred_begin(from), ie=pred_end(from); i != ie; i++) {
+        BasicBlock *bb = *i;
+        TerminatorInst *ti = bb->getTerminator();
+        for (unsigned j=0, je=ti->getNumSuccessors(); j < je; j++) {
+            if (ti->getSuccessor(j) == from) {
+                if (inc.count(bb) == 0) {
+                    inc[bb] = undef; // temporary value to avoid infinite recursion
+                    PropagateValue(v, bb, inc);
+                }
+                if (inc[bb] != undef) {
+                    found = true;
+                }
+                break;
+            }
+        }
+    }
+    if (found) {
+        PHINode *phi = PHINode::Create(v->getType(), v->getName()+"__", from->begin());
+        inc[from] = phi;
+        for (pred_iterator i=pred_begin(from), ie=pred_end(from); i != ie; i++) {
+            phi->addIncoming(inc[*i], *i);
+        }
+        return;
+    }
+    
+    // the value is not defined in the basicblock or its predecessors
+    inc[from] = undef;
+}
+
+Value *PropagateValue(Value *v, BasicBlock *from) {
+    static std::map< Value*, std::map<BasicBlock*, Value*> > map;
+
+    if (isa<Constant>(v) || isa<BasicBlock>(v) || BlockAddress::classof(v))
+        return v;
+
+    for (Function::arg_iterator i = from->getParent()->arg_begin(), ie = from->getParent()->arg_end(); i != ie; i++)
+        if (v == &*i)
+            return v;
+
+    PropagateValue(v, from, map[v]);
+    Value *ret = map[v][from];
+    map.clear();
+    return ret != UndefValue::get(v->getType()) ? ret : NULL;
+}
 
