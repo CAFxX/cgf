@@ -8,9 +8,12 @@ void CGF::run() {
     // enumerate all functions that will be transformed
     TRACEMSG("Registering functions...");
     for (Module::iterator f = m->begin(); f != m->end(); f++) {
-        if (f->isDeclaration() || f->isVarArg())
-            continue;
-        registerFunction(f);
+        if (f->isDeclaration())
+            TRACEMSG("Function declaration skipped");
+        else if (f->isVarArg())
+            TRACEMSG("Variadic function skipped");
+        else
+            registerFunction(f);
     }
 
     // enumerate all callsites that will be transformed
@@ -40,21 +43,28 @@ void CGF::run() {
 
     // flatten functions
     TRACEMSG("Flattening functions...");
-    for (funcMap::iterator f = funcs.begin(); f != funcs.end(); f++) {
+    for (funcMap::iterator f = funcs.begin(), fe = funcs.end(); f != fe; f++) {
         f->second->flatten();
     }
 
     // flatten callsites
     TRACEMSG("Flattening callsites...");
-    for (callsiteMap::iterator s = calls.begin(); s != calls.end(); s++) {
+    for (callsiteMap::iterator s = calls.begin(), se = calls.end(); s != se; s++) {
         s->second->flatten();
     }
 
-    // create wrapper functions
     TRACEMSG("Creating wrappers...");
-    for (funcMap::iterator f = funcs.begin(); f != funcs.end(); f++) {
+    for (funcMap::iterator f = funcs.begin(), fe = funcs.end(); f != fe; f++) {
         f->second->createForwardingWrapper(true);
     }
+
+    /*TRACEMSG("Strip names...");
+    for (Function::iterator i = dispatch->begin(), ie = dispatch->end(); i != ie; ++i) {
+        i->setName("");
+        for (BasicBlock::iterator j = i->begin(), je = i->end(); j != je; ++j) {
+            j->setName("");
+        }
+    }*/
 
     // fix phi_dummys
     TRACEMSG("Fixing broken values...");
@@ -106,43 +116,7 @@ void CGF::createDispatchFunction() {
 
 void CGF::fixBrokenValues() {
     for (Function::iterator i = dispatch->begin(), ie = dispatch->end(); i != ie; i++) {
-        for (BasicBlock::iterator j = i->begin(), je = i->end(); j != je; j++) {
-            if (PHINode *phi = dyn_cast<PHINode>(&*j)) {
-                for (unsigned k=0, ke=phi->getNumIncomingValues(); k<ke; k++) {
-                    Value *v = phi->getIncomingValue(k);
-                    Value *f_v = PropagateValue(v, phi->getIncomingBlock(k));
-                    if (!f_v) {
-                        j->dump();
-                        v->dump();
-                        assert(!"Can't fix broken incoming value!");
-                    } else if (v != f_v) {
-                        phi->setIncomingValue(k, f_v);
-                        statFixedBrokenValues++;
-                    }
-                }
-            } else {
-                for (User::op_iterator k = j->op_begin(), ke = j->op_end(); k != ke; k++) {
-                    Value *v = k->get();
-                    assert(v);
-                    TRACE();
-                    Instruction *inst = dyn_cast<Instruction>(v);
-                    if (inst && inst->getParent() == &*i)
-                        continue;                        
-                    Value *f_v = PropagateValue(v, &*i);
-                    TRACE();
-                    if (!f_v) {
-                        j->dump();
-                        j->getParent()->dump();
-                        v->dump();
-                        inst->getParent()->dump();
-                        assert(!"Can't fix broken value!");
-                    } else if (v != f_v) {
-                        j->replaceUsesOfWith(v, f_v);
-                        statFixedBrokenValues++;
-                    }
-                }
-            }
-        }
+        statFixedBrokenValues += PropagateValues(i);
     }
 }
 

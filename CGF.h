@@ -83,6 +83,9 @@ struct CGFFunction {
     void registerCallee(CGFCallSite *s);
     void createForwardingWrapper(bool replace);
     void fixDummyPhis();
+
+    bool hasArguments();
+    bool hasReturnValue();
 };
 
 #endif

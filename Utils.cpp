@@ -62,60 +62,87 @@ unsigned fixDummyPhis(Function *f) {
 // Value propagation                                                //
 //////////////////////////////////////////////////////////////////////
 
-void PropagateValue(Value *v, BasicBlock *from, std::map<BasicBlock*, Value*> &inc) {
+const char mdkValuePropagation[] = "valprop";
+
+unsigned numPHIs = 0;
+
+Value* PropagateValue(Instruction *v, BasicBlock *from, std::map<BasicBlock*, Value*> &inc) {
+    if (inc.count(from) > 0)
+        return inc[from];
+
     // check if the value is defined in this basic block
-    for (BasicBlock::iterator i=from->begin(), ie=from->end(); i != ie; i++) {
-        if (&*i == v) {
-            inc[from] = v;
-            return;
-        }
-    }
+    if (v->getParent() == from)
+        return v;
     
-    // check if the value is defined in the predecessors
-    Value *undef = UndefValue::get(v->getType());
+    // recursively check if the value is defined in the predecessors
     bool found = false;
-    for (pred_iterator i=pred_begin(from), ie=pred_end(from); i != ie; i++) {
-        BasicBlock *bb = *i;
-        TerminatorInst *ti = bb->getTerminator();
-        for (unsigned j=0, je=ti->getNumSuccessors(); j < je; j++) {
-            if (ti->getSuccessor(j) == from) {
-                if (inc.count(bb) == 0) {
-                    inc[bb] = undef; // temporary value to avoid infinite recursion
-                    PropagateValue(v, bb, inc);
-                }
-                if (inc[bb] != undef) {
-                    found = true;
-                }
-                break;
-            }
-        }
+    unsigned preds = 0;
+    Value *UV = undef(v);
+    PHINode *phi = PHINode::Create(v->getType(), "" /*v->getName()+"__"*/, from->begin());
+    Value *elts[] = { v };
+    phi->setMetadata(mdkValuePropagation, MDNode::get(v->getContext(), elts));
+    inc[from] = phi;
+    for (pred_iterator i=pred_begin(from), ie=pred_end(from); i != ie; i++, preds++) {
+        Value *pv = PropagateValue(v, *i, inc);
+        phi->addIncoming(pv, *i);
+        if (pv != UV)
+            found = true;
     }
-    if (found) {
-        PHINode *phi = PHINode::Create(v->getType(), v->getName()+"__", from->begin());
-        inc[from] = phi;
-        for (pred_iterator i=pred_begin(from), ie=pred_end(from); i != ie; i++) {
-            phi->addIncoming(inc[*i], *i);
-        }
-        return;
+    if (!found) {
+        inc[from] = UV;
+        phi->eraseFromParent();
+        return UV;
+    }
+    if (preds == 1) {
+        Value *pv = phi->getIncomingValue(0);
+        phi->replaceAllUsesWith(pv);
+        phi->eraseFromParent();
+        inc.erase(from);
+        return pv;
     }
     
-    // the value is not defined in the basicblock or its predecessors
-    inc[from] = undef;
+    numPHIs++;
+    //statPHIsBrokenValues++;
+    return phi;
 }
 
-Value *PropagateValue(Value *v, BasicBlock *from) {
-    static std::map< Value*, std::map<BasicBlock*, Value*> > map;
+std::map< Value*, std::map<BasicBlock*, Value*> > map;
 
+Value *PropagateValue(Value *v, BasicBlock *from) {
     if (isa<Constant>(v) || isa<BasicBlock>(v) || BlockAddress::classof(v))
         return v;
 
-    for (Function::arg_iterator i = from->getParent()->arg_begin(), ie = from->getParent()->arg_end(); i != ie; i++)
-        if (v == &*i)
-            return v;
+    Argument *arg = dyn_cast<Argument>(v);
+    if (arg && arg->getParent() == from->getParent())
+        return v;
+    else if (arg)
+        assert(!"Can't propagate argument from a different function!");
 
-    PropagateValue(v, from, map[v]);
-    Value *ret = map[v][from];
-    map.clear();
-    return ret != UndefValue::get(v->getType()) ? ret : NULL;
+    Instruction *inst = dyn_cast<Instruction>(v);
+    assert(inst);
+
+    Value *ret = PropagateValue(inst, from, map[v]);
+
+    return ret != undef(v) ? ret : NULL;
+}
+
+unsigned PropagateValues(BasicBlock *bb) {
+    TRACE();
+    unsigned count = 0;
+    std::set<Value*> bbVals;
+    for (BasicBlock::iterator i = bb->begin(), ie = bb->end(); i != ie; ++i) {
+        if (!i->getMetadata(mdkValuePropagation)) {
+            for (User::op_iterator j = i->op_begin(), je = i->op_end(); j != je; ++j) {
+                if (bbVals.count(j->get()) == 0) {
+                    Value *pVal = PropagateValue(j->get(), bb);
+                    assert(pVal);
+                    j->set(pVal);
+                    count++;
+                }                
+            }
+        }
+        bbVals.insert(i);
+    }
+    return count;
 }
 

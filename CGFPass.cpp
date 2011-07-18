@@ -7,6 +7,7 @@ using namespace llvm;
 
 STATISTIC(statCanonicalizedCallsites, "Number of canonicalized callsites");
 STATISTIC(statFixedBrokenValues, "Number of fixed broken values"); 
+//STATISTIC(statPHIsBrokenValues, "Number of PHIs for broken values"); 
 
 namespace {
 

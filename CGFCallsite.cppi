@@ -40,24 +40,35 @@ void CGFCallSite::flatten() {
     assert(prepared && "Not prepared");
     assert(!flattened && "Already flattened");
 
+    //s->dump();
     assert(s->getParent()->getParent() == c->dispatch);
     // FIXME: handle indirect calls
+    TRACE();
     BranchInst *callinst = BranchInst::Create(Callee->innerDispatch);
+    TRACE();
     ReplaceInstWithInst(s->getParent()->getTerminator(), callinst);
 
+    TRACE();
     for (unsigned j=0; j<Args.size(); j++) {
         Callee->argphis[j]->addIncoming(Parent->vmap[Args[j]], s->getParent());
     }
+    TRACE();
     Callee->retphi->addIncoming(BlockAddress::get(RetBB), s->getParent());
+    TRACE();
     Callee->retinst->addDestination(RetBB);
 
-    if (Callee->retVal) {
+    TRACE();
+    if (Callee->hasReturnValue()) {
+        TRACE();
         Value *newRetVal = PropagateValue(Callee->retVal, RetBB);
         assert(newRetVal);
+        TRACE();
         s->replaceAllUsesWith(newRetVal);
     }
+    TRACE();
     s->eraseFromParent(); // s==RetVal
 
+    TRACE();
     flattened = true;
 }
 

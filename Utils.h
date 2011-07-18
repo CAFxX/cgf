@@ -24,4 +24,5 @@ unsigned fixDummyPhis(Function *f);
 //////////////////////////////////////////////////////////////////////
 
 Value *PropagateValue(Value *v, BasicBlock *from);
+unsigned PropagateValues(BasicBlock *bb);
 
