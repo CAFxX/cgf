@@ -74,47 +74,10 @@ void CGF::run() {
     TRACEMSG("Fixing dummy phis...");
     fixDummyPhis();
 
-    /*
-    TRACEMSG("Replace indirectbr");
-    BasicBlock *ubb = BasicBlock::Create(dispatch->getContext(), "unreachable", dispatch);
-    new UnreachableInst(dispatch->getContext(), ubb);
-    TRACE();
-    std::vector<IndirectBrInst*> wlBr;
-    for (inst_iterator i = inst_begin(dispatch), ie = inst_end(dispatch); i != ie; i++)
-        if (dyn_cast<IndirectBrInst>(&*i))
-            wlBr.push_back(dyn_cast<IndirectBrInst>(&*i));
-    TRACE();
-    for (std::vector<IndirectBrInst*>::iterator j = wlBr.begin(), je = wlBr.end(); j != je; j++) {
-        TRACE();
-        BasicBlock *next = ubb;
-        Value *a = (*j)->getAddress(); assert(a);
-        PtrToIntInst *ai = new PtrToIntInst(a, Type::getInt64Ty(m->getContext()), "", *j); assert(ai);
-        for (unsigned k=0, ke=(*j)->getNumDestinations(); k != ke; k++) {
-            TRACE();
-            BasicBlock *bb = BasicBlock::Create(m->getContext(), "", dispatch); assert(bb);
-            BasicBlock *d = (*j)->getDestination(k); assert(d);
-            BlockAddress *da = BlockAddress::get(d); assert(da);
-            Constant *dai = ConstantExpr::getPointerCast(da, Type::getInt64Ty(m->getContext())); assert(dai);
-            ICmpInst *icmp = new ICmpInst(*bb, CmpInst::ICMP_EQ, ai, dai); assert(icmp);
-            BranchInst::Create(d, next, icmp, bb);
-            next = bb;
-            for (BasicBlock::iterator l=d->begin(), le=d->end(); l != le; l++) {
-                PHINode *phi = dyn_cast<PHINode>(l);
-                if (phi)
-                    phi->setIncomingBlock(phi->getBasicBlockIndex((*j)->getParent()), bb);
-            }
-        }
-        TRACE();
-        BranchInst::Create(next, *j);
-        TRACE();
-        (*j)->eraseFromParent();
-    }
-    */
-
     dispatch->setDoesNotAccessMemory(false);
     for (int i=0; i<=3; i++) {
-        dispatch->setDoesNotAlias(i, i != 0);
-        dispatch->setDoesNotCapture(i, i != 0);
+        dispatch->setDoesNotAlias(i, i >= 2);
+        dispatch->setDoesNotCapture(i, i >= 2);
     }
 }
 
@@ -134,21 +97,28 @@ void CGF::createDispatchFunction() {
     // create the function itself
     TRACE();
     std::vector<const Type*> args(3);
-    args[0] = args[1] = args[2] = opaqueTy;
+    args[0] = Type::getInt16Ty(m->getContext());
+    args[1] = args[2] = opaqueTy;
     const FunctionType *dispatchTy = FunctionType::get(Type::getVoidTy(m->getContext()), args, false);
     dispatch = Function::Create(dispatchTy, GlobalValue::PrivateLinkage, "dispatch", m);
     dispatch->setCallingConv(CallingConv::Fast);
     Function::arg_iterator i = dispatch->arg_begin();
-    Argument *entryBBptr = &*i;
-    entryBBptr->setName("EntryBBPtr");
+    Argument *entryBB = &*i;
+    entryBB->setName("EntryBB");
     (dispatchArgs = &*++i)->setName("OpaqueArgumentsPtr");
     (dispatchRetVal = &*++i)->setName("OpaqueReturnValuePtr");
 
-    // create the outer dispatcher
+    // create the entry block
     TRACE();
     BasicBlock *dispatchEntry = BasicBlock::Create(m->getContext(), "entry", dispatch);
     assert(dispatchEntry == &dispatch->getEntryBlock());
-    outerDispatcher = IndirectBrInst::Create(entryBBptr, 0, dispatchEntry);
+
+    // create the unreacheable basic block
+    unreachable = BasicBlock::Create(m->getContext(), "unreachable", dispatch);
+    new UnreachableInst(m->getContext(), unreachable);
+
+    // create the outer dispatcher
+    outerDispatcher = SwitchInst::Create(entryBB, unreachable, 0, dispatchEntry);
 }
 
 void CGF::fixBrokenValues() {

@@ -40,7 +40,6 @@ void CGFCallSite::flatten() {
     assert(prepared && "Not prepared");
     assert(!flattened && "Already flattened");
 
-    //s->dump();
     assert(s->getParent()->getParent() == c->dispatch);
     // FIXME: handle indirect calls
     TRACE();
@@ -53,9 +52,11 @@ void CGFCallSite::flatten() {
         Callee->argphis[j]->addIncoming(Parent->vmap[Args[j]], s->getParent());
     }
     TRACE();
-    Callee->retphi->addIncoming(BlockAddress::get(RetBB), s->getParent());
+    ConstantInt *retphi_case = cast<ConstantInt>(ConstantInt::get(Callee->retphi->getType(), Callee->retphi->getNumIncomingValues()));
     TRACE();
-    Callee->retinst->addDestination(RetBB);
+    Callee->retphi->addIncoming(retphi_case, s->getParent());
+    TRACE();
+    Callee->retinst->addCase(retphi_case, RetBB);
 
     TRACE();
     if (Callee->hasReturnValue()) {

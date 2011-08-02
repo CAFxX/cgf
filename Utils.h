@@ -12,6 +12,8 @@ Value* undef(const Value *v);
 
 bool isImmediatePredecessor(BasicBlock *pred, BasicBlock *bb);
 
+const Type* getContainingIntTy(LLVMContext &c, uint64_t val);
+
 //////////////////////////////////////////////////////////////////////
 // Value propagation                                                //
 //////////////////////////////////////////////////////////////////////

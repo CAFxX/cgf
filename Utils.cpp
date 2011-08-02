@@ -16,6 +16,13 @@ bool isImmediatePredecessor(BasicBlock *pred, BasicBlock *bb) {
   return false;
 }
 
+const Type* getContainingIntTy(LLVMContext &c, uint64_t val) {
+  for (unsigned n=0; n<sizeof(val)*8; n++)
+    if (((uint64_t)1)<<n > val)
+      return Type::getIntNTy(c, n+1);
+  return Type::getInt64Ty(c);
+}
+
 //////////////////////////////////////////////////////////////////////
 // Value propagation                                                //
 //////////////////////////////////////////////////////////////////////

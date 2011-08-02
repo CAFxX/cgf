@@ -32,7 +32,8 @@ void CGFFunction::flatten() {
 
     // add the outer dispatcher to the indirectbr in the dispatch function
     TRACE();
-    c->outerDispatcher->addDestination(outerDispatch);
+    entryBB = cast<ConstantInt>(ConstantInt::get(c->outerDispatcher->getCondition()->getType(), c->outerDispatcher->getNumCases()));
+    c->outerDispatcher->addCase(entryBB, outerDispatch);
 
     // populate the outer dispatcher (and phi nodes of the inner)
     // get the opaque arg structure
@@ -52,9 +53,10 @@ void CGFFunction::flatten() {
         }
     }
     // create a phi to hold the return address
-    BlockAddress *retaddr = BlockAddress::get(returnDispatch);
-    retphi = PHINode::Create(retaddr->getType(), "cgf.retphi." + f->getName(), innerDispatch);
-    retphi->addIncoming(retaddr, outerDispatch);
+    const Type *retphi_type = getContainingIntTy(f->getContext(), callers.size());
+    retphi = PHINode::Create(retphi_type, "cgf.retphi." + f->getName(), innerDispatch);
+    ConstantInt *retphi_case = cast<ConstantInt>(ConstantInt::get(retphi_type, 0));
+    retphi->addIncoming(retphi_case, outerDispatch);
     // create a jump to the innerDispatch
     BranchInst::Create(innerDispatch, outerDispatch);
 
@@ -77,7 +79,8 @@ void CGFFunction::flatten() {
         assert(retVal);
     }
     // replace the return with an indirectbr
-    retinst = IndirectBrInst::Create(retphi, 0);
+    retinst = SwitchInst::Create(retphi, c->unreachable, 1);
+    retinst->addCase(retphi_case, returnDispatch);
     ReplaceInstWithInst(retinsts[0], retinst);
 
     // populate the returnDispatch
@@ -88,7 +91,6 @@ void CGFFunction::flatten() {
         new StoreInst(retVal, retvalptr, returnDispatch);
     }
     ReturnInst::Create(f->getContext(), returnDispatch);
-    retinst->addDestination(returnDispatch);
 
     flattened = true;
 
@@ -160,7 +162,7 @@ void CGFFunction::createForwardingWrapper(bool replace) {
     // create the forwarding call
     TRACE();
     std::vector<Value*> wrappedArgs(3);
-    wrappedArgs[0] = BlockAddress::get(outerDispatch);
+    wrappedArgs[0] = entryBB;
     wrappedArgs[1] = opaqueargsptr;
     wrappedArgs[2] = opaqueretvalptr;
     CallInst *CI = CallInst::Create(Target, wrappedArgs.begin(), wrappedArgs.end(), "", BB);
