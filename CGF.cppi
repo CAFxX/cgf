@@ -58,13 +58,13 @@ void CGF::run() {
         f->second->createForwardingWrapper(true);
     }
 
-    /*TRACEMSG("Strip names...");
+    TRACEMSG("Strip names...");
     for (Function::iterator i = dispatch->begin(), ie = dispatch->end(); i != ie; ++i) {
-        i->setName("");
+        //i->setName("");
         for (BasicBlock::iterator j = i->begin(), je = i->end(); j != je; ++j) {
             j->setName("");
         }
-    }*/
+    }
 
     // fix phi_dummys
     TRACEMSG("Fixing broken values...");
@@ -73,6 +73,43 @@ void CGF::run() {
     // fix phi_dummys
     TRACEMSG("Fixing dummy phis...");
     fixDummyPhis();
+
+    /*
+    TRACEMSG("Replace indirectbr");
+    BasicBlock *ubb = BasicBlock::Create(dispatch->getContext(), "unreachable", dispatch);
+    new UnreachableInst(dispatch->getContext(), ubb);
+    TRACE();
+    std::vector<IndirectBrInst*> wlBr;
+    for (inst_iterator i = inst_begin(dispatch), ie = inst_end(dispatch); i != ie; i++)
+        if (dyn_cast<IndirectBrInst>(&*i))
+            wlBr.push_back(dyn_cast<IndirectBrInst>(&*i));
+    TRACE();
+    for (std::vector<IndirectBrInst*>::iterator j = wlBr.begin(), je = wlBr.end(); j != je; j++) {
+        TRACE();
+        BasicBlock *next = ubb;
+        Value *a = (*j)->getAddress(); assert(a);
+        PtrToIntInst *ai = new PtrToIntInst(a, Type::getInt64Ty(m->getContext()), "", *j); assert(ai);
+        for (unsigned k=0, ke=(*j)->getNumDestinations(); k != ke; k++) {
+            TRACE();
+            BasicBlock *bb = BasicBlock::Create(m->getContext(), "", dispatch); assert(bb);
+            BasicBlock *d = (*j)->getDestination(k); assert(d);
+            BlockAddress *da = BlockAddress::get(d); assert(da);
+            Constant *dai = ConstantExpr::getPointerCast(da, Type::getInt64Ty(m->getContext())); assert(dai);
+            ICmpInst *icmp = new ICmpInst(*bb, CmpInst::ICMP_EQ, ai, dai); assert(icmp);
+            BranchInst::Create(d, next, icmp, bb);
+            next = bb;
+            for (BasicBlock::iterator l=d->begin(), le=d->end(); l != le; l++) {
+                PHINode *phi = dyn_cast<PHINode>(l);
+                if (phi)
+                    phi->setIncomingBlock(phi->getBasicBlockIndex((*j)->getParent()), bb);
+            }
+        }
+        TRACE();
+        BranchInst::Create(next, *j);
+        TRACE();
+        (*j)->eraseFromParent();
+    }
+    */
 
     dispatch->setDoesNotAccessMemory(false);
     for (int i=0; i<=3; i++) {
@@ -115,8 +152,10 @@ void CGF::createDispatchFunction() {
 }
 
 void CGF::fixBrokenValues() {
-    for (Function::iterator i = dispatch->begin(), ie = dispatch->end(); i != ie; i++) {
+    unsigned b=0;
+    for (Function::iterator i = dispatch->begin(), ie = dispatch->end(); i != ie; i++, b++) {
         statFixedBrokenValues += PropagateValues(i);
+        fprintf(stderr, "%d/%ld BBs, %d Values\r", b, dispatch->size(), statFixedBrokenValues.getValue());
     }
 }
 

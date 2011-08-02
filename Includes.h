@@ -19,6 +19,7 @@
 #include <map>
 #include <vector>
 #include <set>
+#include <cstdio>
 
 using namespace llvm;
 

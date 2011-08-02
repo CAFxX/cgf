@@ -17,54 +17,24 @@ bool isImmediatePredecessor(BasicBlock *pred, BasicBlock *bb) {
 }
 
 //////////////////////////////////////////////////////////////////////
-// Dummy Phis                                                       //
-//////////////////////////////////////////////////////////////////////
-
-const char mdkDummyPhi[] = "dummyphi";
-
-PHINode* createDummyPhi(BasicBlock *BB, Value *v, BasicBlock *from) {
-  Value *vOrig = v;
-  if (PHINode *vphi = dyn_cast<PHINode>(v))
-    if (MDNode *md = vphi->getMetadata(mdkDummyPhi))
-      vOrig = md->getOperand(0);
-  PHINode *phi = PHINode::Create(v->getType(), "cgf.dummyphi."+vOrig->getName(), BB);
-  phi->addIncoming(v, from);
-  Value *elts[] = { vOrig };
-  phi->setMetadata(mdkDummyPhi, MDNode::get(v->getContext(), elts));
-  return phi;
-}
-
-bool fixDummyPhi(PHINode *phi) {
-  if (phi == NULL)
-    return false;
-  if (!phi->getMetadata(mdkDummyPhi))
-    return false;
-  BasicBlock *bb = phi->getParent();
-  for (pred_iterator i = pred_begin(bb), ie = pred_end(bb); i != ie; i++)
-    if (phi->getBasicBlockIndex(*i) < 0 && isImmediatePredecessor(*i, bb))
-      phi->addIncoming(undef(phi), *i);
-  return true;
-}
-
-bool fixDummyPhi(Value *v) {
-  return fixDummyPhi(dyn_cast<PHINode>(v));
-}
-
-unsigned fixDummyPhis(Function *f) {
-  unsigned numDummyPhis = 0;
-  for (inst_iterator i = inst_begin(f), ie = inst_end(f); i != ie; i++)
-    if (fixDummyPhi(&*i))
-      numDummyPhis++;
-  return numDummyPhis;
-}
-
-//////////////////////////////////////////////////////////////////////
 // Value propagation                                                //
 //////////////////////////////////////////////////////////////////////
 
-const char mdkValuePropagation[] = "valprop";
+const char mdkValuePropagation[] = "VP";
 
 unsigned numPHIs = 0;
+
+bool Dominates(Instruction *v, Instruction *dominator) {
+    BasicBlock *bb = v->getParent();
+    assert(bb == dominator->getParent());
+    bool dominatorFound = false;
+    for (BasicBlock::iterator i=bb->begin(), ie=bb->end(); i != ie; i++)
+        if (&*i == dominator)
+            dominatorFound = true;
+        else if (&*i == v)
+            return dominatorFound;
+    assert(!"unreacheable");        
+}
 
 Value* PropagateValue(Instruction *v, BasicBlock *from, std::map<BasicBlock*, Value*> &inc) {
     if (inc.count(from) > 0)
@@ -78,11 +48,15 @@ Value* PropagateValue(Instruction *v, BasicBlock *from, std::map<BasicBlock*, Va
     bool found = false;
     unsigned preds = 0;
     Value *UV = undef(v);
-    PHINode *phi = PHINode::Create(v->getType(), "" /*v->getName()+"__"*/, from->begin());
+    PHINode *phi = PHINode::Create(v->getType(), "", from->begin());
     Value *elts[] = { v };
     phi->setMetadata(mdkValuePropagation, MDNode::get(v->getContext(), elts));
     inc[from] = phi;
+    std::vector<BasicBlock*> wlBB;
     for (pred_iterator i=pred_begin(from), ie=pred_end(from); i != ie; i++, preds++) {
+        wlBB.push_back(*i);
+    }
+    for (std::vector<BasicBlock*>::iterator i = wlBB.begin(), ie = wlBB.end(); i != ie; i++) {
         Value *pv = PropagateValue(v, *i, inc);
         phi->addIncoming(pv, *i);
         if (pv != UV)
@@ -92,13 +66,6 @@ Value* PropagateValue(Instruction *v, BasicBlock *from, std::map<BasicBlock*, Va
         inc[from] = UV;
         phi->eraseFromParent();
         return UV;
-    }
-    if (preds == 1) {
-        Value *pv = phi->getIncomingValue(0);
-        phi->replaceAllUsesWith(pv);
-        phi->eraseFromParent();
-        inc.erase(from);
-        return pv;
     }
     
     numPHIs++;
@@ -126,23 +93,36 @@ Value *PropagateValue(Value *v, BasicBlock *from) {
     return ret != undef(v) ? ret : NULL;
 }
 
+Value* GetOriginalValue(Value *i) {
+  Instruction *j = dyn_cast<Instruction>(i);
+  if (!j) return i;
+  MDNode *md = j->getMetadata(mdkValuePropagation);
+  return md ? GetOriginalValue(md->getOperand(0)) : i;
+}
+
 unsigned PropagateValues(BasicBlock *bb) {
-    TRACE();
     unsigned count = 0;
     std::set<Value*> bbVals;
+    std::set<Instruction*> wlVals;
+
     for (BasicBlock::iterator i = bb->begin(), ie = bb->end(); i != ie; ++i) {
-        if (!i->getMetadata(mdkValuePropagation)) {
-            for (User::op_iterator j = i->op_begin(), je = i->op_end(); j != je; ++j) {
-                if (bbVals.count(j->get()) == 0) {
-                    Value *pVal = PropagateValue(j->get(), bb);
-                    assert(pVal);
-                    j->set(pVal);
-                    count++;
-                }                
-            }
+        if (!isa<PHINode>(&*i)) {
+            wlVals.insert(&*i);
         }
-        bbVals.insert(i);
     }
+    
+    for (std::set<Instruction*>::iterator i = wlVals.begin(), ie = wlVals.end(); i != ie; ++i) {    
+        for (User::op_iterator j = (*i)->op_begin(), je = (*i)->op_end(); j != je; ++j) {
+            if (bbVals.count(j->get()) == 0) {
+                Value *pVal = PropagateValue(GetOriginalValue(j->get()), bb);
+                assert(pVal);
+                j->set(pVal);
+                count++;
+            }                
+        }
+        bbVals.insert(*i);
+    }
+
     return count;
 }
 

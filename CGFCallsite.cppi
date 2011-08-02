@@ -78,7 +78,7 @@ void CGFCallSite::splitRetBB() {
         if (&*i == s) {
             RetBB = SplitBlock(parent, ++i, c->p);
             assert(RetBB != NULL && "Can't split BB - SplitBlock returned NULL");
-            RetBB->setName(parent->getName());
+            RetBB->setName("bb");
             statCanonicalizedCallsites++;
             return;
         }
